@@ -2,29 +2,35 @@
 export class ExporterService {
   static async exportAll(markdown, audioUrl, blocks) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const baseName = `sync-speak-${timestamp}`;
     
-    // 1. Download Markdown
-    this.downloadBlob(new Blob([markdown], {type: 'text/markdown'}), `script-${timestamp}.md`);
+    // 1. Markdown Source
+    this._download(new Blob([markdown], {type: 'text/markdown'}), `${baseName}.md`);
 
-    // 2. Download JSON Manifest
+    // 2. JSON Manifest (for reconstruction)
     const manifest = {
         version: "1.0",
         blocks: blocks,
-        exportedAt: timestamp
+        exportedAt: timestamp,
+        source: "SyncSpeak No-Build"
     };
-    this.downloadBlob(new Blob([JSON.stringify(manifest, null, 2)], {type: 'application/json'}), `manifest-${timestamp}.json`);
+    this._download(new Blob([JSON.stringify(manifest, null, 2)], {type: 'application/json'}), `${baseName}.json`);
 
-    // 3. Download Audio (MP3/WAV)
+    // 3. Audio File
     if (audioUrl) {
-        const response = await fetch(audioUrl);
-        const audioBlob = await response.blob();
-        this.downloadBlob(audioBlob, `audio-${timestamp}.wav`);
+        try {
+            const response = await fetch(audioUrl);
+            const audioBlob = await response.blob();
+            this._download(audioBlob, `${baseName}.wav`);
+        } catch (e) {
+            console.error("Audio export failed", e);
+        }
     }
 
-    alert('Triple-pack export started! Check your downloads for the .md, .json, and .wav files.');
+    console.log("Triple-export complete.");
   }
 
-  static downloadBlob(blob, filename) {
+  static _download(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
