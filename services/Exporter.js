@@ -1,40 +1,32 @@
-
 export class ExporterService {
-  static async exportAll(markdown, audioUrl, blocks) {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const baseName = `sync-speak-${timestamp}`;
+  static async exportAll(md, audioUrl, blocks) {
+    const id = Date.now();
     
-    // 1. Markdown Source
-    this._download(new Blob([markdown], {type: 'text/markdown'}), `${baseName}.md`);
+    // 1. MD
+    this.save(new Blob([md], {type: 'text/markdown'}), `script-${id}.md`);
 
-    // 2. JSON Manifest (for reconstruction)
+    // 2. JSON Manifest
     const manifest = {
-        version: "1.0",
-        blocks: blocks,
-        exportedAt: timestamp,
-        source: "SyncSpeak No-Build"
+        blocks,
+        exportedAt: new Date().toISOString(),
+        format: "SyncSpeak-v1"
     };
-    this._download(new Blob([JSON.stringify(manifest, null, 2)], {type: 'application/json'}), `${baseName}.json`);
+    this.save(new Blob([JSON.stringify(manifest, null, 2)], {type: 'application/json'}), `manifest-${id}.json`);
 
-    // 3. Audio File
+    // 3. WAV Audio
     if (audioUrl) {
-        try {
-            const response = await fetch(audioUrl);
-            const audioBlob = await response.blob();
-            this._download(audioBlob, `${baseName}.wav`);
-        } catch (e) {
-            console.error("Audio export failed", e);
-        }
+      const blob = await fetch(audioUrl).then(r => r.blob());
+      this.save(blob, `audio-${id}.wav`);
     }
 
-    console.log("Triple-export complete.");
+    alert('Triple Export Triggered! You will receive 3 files: .md, .json, and .wav');
   }
 
-  static _download(blob, filename) {
+  static save(blob, name) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = filename;
+    a.download = name;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

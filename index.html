@@ -1,10 +1,9 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SyncSpeak Editor</title>
+    <title>SyncSpeak Editor | No-Build Architecture</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="importmap">
     {
@@ -17,20 +16,233 @@
     }
     </script>
     <style>
-        body { margin: 0; padding: 0; background-color: #f8fafc; font-family: sans-serif; height: 100vh; overflow: hidden; }
+        body { margin: 0; padding: 0; background-color: #f8fafc; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; height: 100vh; overflow: hidden; }
         #app-root { height: 100%; }
         
-        /* Custom scrollbar for better UI */
+        /* Custom scrollbar */
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        .glass { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(12px); border-bottom: 1px solid rgba(226, 232, 240, 0.8); }
+
+        /* Lit Component Styles defined inside the script to avoid extra files */
     </style>
 </head>
 <body>
     <div id="app-root">
         <sync-speak-app></sync-speak-app>
     </div>
-    <script type="module" src="./app.js"></script>
+
+    <script type="module">
+        import { LitElement, html, css } from 'lit';
+        import { marked } from 'marked';
+        import { GoogleGenAI, Modality } from "@google/genai";
+
+        // --- SERVICES (Inlined for single-file delivery) ---
+        
+        class ExporterService {
+            static async exportAll(md, audioUrl, blocks) {
+                const id = Date.now();
+                this.save(new Blob([md], {type: 'text/markdown'}), `script-${id}.md`);
+                const manifest = { blocks, exportedAt: new Date().toISOString(), format: "SyncSpeak-v1" };
+                this.save(new Blob([JSON.stringify(manifest, null, 2)], {type: 'application/json'}), `manifest-${id}.json`);
+                if (audioUrl) {
+                    const blob = await fetch(audioUrl).then(r => r.blob());
+                    this.save(blob, `audio-${id}.wav`);
+                }
+                alert('Triple Export Complete: .md, .json, and .wav saved.');
+            }
+            static save(blob, name) {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }
+        }
+
+        class GeminiTTSService {
+            async generateConversation(markdown, speakers) {
+                const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+                const cleanText = markdown.replace(/<[^>]*>/g, '').trim();
+                const sA = speakers[0] || 'Joe';
+                const sB = speakers[1] || 'Jane';
+
+                const response = await ai.models.generateContent({
+                    model: "gemini-2.5-flash-preview-tts",
+                    contents: [{ parts: [{ text: `Synthesize conversation between ${sA} and ${sB}. Script:\n${cleanText}` }] }],
+                    config: {
+                        responseModalities: [Modality.AUDIO],
+                        speechConfig: {
+                            multiSpeakerVoiceConfig: {
+                                speakerVoiceConfigs: [
+                                    { speaker: sA, voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
+                                    { speaker: sB, voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } }
+                                ]
+                            }
+                        }
+                    }
+                });
+
+                const base64 = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+                if (!base64) throw new Error("No audio returned.");
+
+                const bin = atob(base64);
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+
+                // WAV Header logic
+                const rate = 24000;
+                const buf = new ArrayBuffer(44 + bytes.length);
+                const view = new DataView(buf);
+                view.setUint32(0, 0x52494646, false); view.setUint32(4, 36 + bytes.length, true);
+                view.setUint32(8, 0x57415645, false); view.setUint32(12, 0x666d7420, false);
+                view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+                view.setUint16(22, 1, true); view.setUint32(24, rate, true);
+                view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true);
+                view.setUint16(34, 16, true); view.setUint32(36, 0x64617461, false);
+                view.setUint32(40, bytes.length, true);
+                new Uint8Array(buf, 44).set(bytes);
+                return new Blob([buf], { type: 'audio/wav' });
+            }
+        }
+
+        // --- UI COMPONENT ---
+
+        class SyncSpeakApp extends LitElement {
+            static properties = {
+                markdown: { type: String },
+                speakers: { type: Array },
+                isGenerating: { type: Boolean },
+                audioUrl: { type: String },
+                currentTime: { type: Number },
+                blocks: { type: Array }
+            };
+
+            static styles = css`
+                :host { display: block; height: 100vh; }
+                .layout { display: flex; flex-direction: column; height: 100%; }
+                .toolbar { height: 64px; display: flex; align-items: center; padding: 0 1.5rem; background: #fff; border-bottom: 1px solid #e2e8f0; gap: 1rem; z-index: 50; }
+                .main-view { flex: 1; display: flex; overflow: hidden; background: #f1f5f9; }
+                .editor-section { flex: 1; border-right: 1px solid #e2e8f0; display: flex; flex-direction: column; background: #fff; }
+                .preview-section { flex: 1; overflow-y: auto; padding: 2.5rem; background: #fff; scroll-behavior: smooth; }
+                textarea { flex: 1; resize: none; border: none; padding: 2rem; font-family: monospace; font-size: 15px; line-height: 1.7; outline: none; }
+                .btn { padding: 0.6rem 1rem; border-radius: 0.5rem; font-weight: 600; cursor: pointer; border: 1px solid #e2e8f0; background: #fff; transition: all 0.2s; font-size: 0.875rem; color: #475569; display: flex; align-items: center; gap: 0.5rem; }
+                .btn:hover:not(:disabled) { background: #f8fafc; border-color: #cbd5e1; color: #1e293b; }
+                .btn-primary { background: #2563eb; color: #fff; border: none; }
+                .btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+                .btn:disabled { opacity: 0.5; }
+                .audio-bar { height: 80px; background: #fff; border-top: 1px solid #e2e8f0; display: flex; align-items: center; padding: 0 2rem; gap: 2rem; }
+                audio { flex: 1; height: 40px; }
+                .speaker-tag { font-weight: 800; color: #0f172a; text-transform: uppercase; background: #f1f5f9; padding: 0.1rem 0.3rem; border-radius: 4px; }
+                .timestamp-jump { cursor: pointer; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; border: 2px solid transparent; transition: all 0.2s; }
+                .timestamp-jump:hover { background: #f8fafc; }
+                .timestamp-jump.active { background: #f0f9ff; border-color: #3b82f6; }
+                .time-badge { font-size: 0.65rem; color: #94a3b8; font-family: monospace; }
+                details { border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 1rem; }
+                summary { padding: 0.5rem 1rem; cursor: pointer; font-weight: bold; background: #f8fafc; }
+            `;
+
+            constructor() {
+                super();
+                this.markdown = `Joe: Hey Jane, check out this live preview!\n\nJane: It's working! No-build architecture is so fast.\n\nJoe: Exactly. We can sync audio blocks just by clicking them.\n\n<details>\n<summary>Project Stats</summary>\n\n- No Compilers\n- No Node Modules\n- Just standard Web APIs\n\n</details>`;
+                this.speakers = [];
+                this.isGenerating = false;
+                this.audioUrl = '';
+                this.currentTime = 0;
+                this.blocks = [];
+                this.tts = new GeminiTTSService();
+            }
+
+            updated(cp) { if (cp.has('markdown')) this.sync(); }
+            firstUpdated() { this.sync(); }
+
+            sync() {
+                const regex = /^([A-Z][a-z0-9_ ]+):/gm;
+                const matches = [...this.markdown.matchAll(regex)];
+                this.speakers = [...new Set(matches.map(m => m[1]))].slice(0, 2).map(s => s.toUpperCase());
+                
+                const sections = this.markdown.split(/\n\n+/).filter(s => s.trim());
+                let time = 0;
+                this.blocks = sections.map((text, i) => {
+                    const wc = text.replace(/<[^>]*>/g, '').split(/\s+/).length;
+                    const dur = Math.max(2, wc * 0.45);
+                    const b = { text, id: i, startTime: time, duration: dur };
+                    time += dur;
+                    return b;
+                });
+            }
+
+            async generate() {
+                this.isGenerating = true;
+                try {
+                    const blob = await this.tts.generateConversation(this.markdown, this.speakers);
+                    if (this.audioUrl) URL.revokeObjectURL(this.audioUrl);
+                    this.audioUrl = URL.createObjectURL(blob);
+                } catch (e) { alert(e.message); }
+                finally { this.isGenerating = false; }
+            }
+
+            render() {
+                return html`
+                <div class="layout">
+                    <header class="toolbar">
+                        <div class="flex items-center gap-2">
+                            <div class="w-8 h-8 bg-blue-600 rounded flex items-center justify-center text-white font-bold">S</div>
+                            <span class="font-bold text-slate-800">SyncSpeak</span>
+                        </div>
+                        <div class="flex-1"></div>
+                        <button class="btn" @click=${() => this.wrap()}>+ Details</button>
+                        <button class="btn btn-primary" ?disabled=${this.isGenerating} @click=${this.generate}>
+                            ${this.isGenerating ? 'Synthesizing...' : 'Generate Sync Audio'}
+                        </button>
+                        <button class="btn bg-slate-800 text-white border-none" @click=${() => ExporterService.exportAll(this.markdown, this.audioUrl, this.blocks)}>Export</button>
+                    </header>
+                    <main class="main-view">
+                        <div class="editor-section">
+                            <textarea .value=${this.markdown} @input=${e => this.markdown = e.target.value}></textarea>
+                        </div>
+                        <div class="preview-section">
+                            <div class="max-w-2xl mx-auto">
+                                ${this.blocks.map(b => {
+                                    const active = this.currentTime >= b.startTime && this.currentTime < (b.startTime + b.duration);
+                                    let content = marked.parse(b.text);
+                                    this.speakers.forEach(s => {
+                                        content = content.replace(new RegExp(`(${s}):`, 'gi'), `<span class="speaker-tag">$1:</span>`);
+                                    });
+                                    return html`
+                                        <div class="timestamp-jump ${active ? 'active' : ''}" @click=${() => {
+                                            const a = this.renderRoot.querySelector('audio');
+                                            a.currentTime = b.startTime; a.play();
+                                        }}>
+                                            <div class="time-badge">${b.startTime.toFixed(1)}s</div>
+                                            <div class="prose">${html([content])}</div>
+                                        </div>
+                                    `;
+                                })}
+                            </div>
+                        </div>
+                    </main>
+                    <footer class="audio-bar">
+                        <audio controls .src=${this.audioUrl} @timeupdate=${e => this.currentTime = e.target.currentTime}></audio>
+                        <div class="font-mono text-slate-400 text-sm">${this.currentTime.toFixed(1)}s</div>
+                    </footer>
+                </div>`;
+            }
+
+            wrap() {
+                const tx = this.renderRoot.querySelector('textarea');
+                const s = tx.selectionStart, e = tx.selectionEnd;
+                const rep = `<details>\n<summary>Click to expand</summary>\n\n${this.markdown.substring(s, e) || 'Content'}\n\n</details>`;
+                this.markdown = this.markdown.substring(0, s) + rep + this.markdown.substring(e);
+            }
+        }
+        customElements.define('sync-speak-app', SyncSpeakApp);
+    </script>
 </body>
 </html>
