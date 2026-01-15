@@ -1,0 +1,7 @@
+{
+  "name": "SyncSpeak No-Build Editor",
+  "description": "A synchronized Markdown editor and conversation builder with Gemini-powered TTS, speaker detection, and interactive audio playback.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
